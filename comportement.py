@@ -60,8 +60,10 @@ Block index
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import math
+import re
 import shutil
 import struct
 import subprocess
@@ -140,11 +142,51 @@ def _resolve_audio(audio_path) -> Path:
     return Path(__file__).parent / p
 
 
+ROBOT_AUDIO_DEVICE = "Reachy Mini"  # substring of the robot's USB speaker name
+
+
+_MIXER_LOCK = threading.Lock()
+
+
+def init_mixer_on_robot(**kwargs) -> None:
+    """
+    Open pygame's mixer on the Reachy Mini's own speaker (seen by the OS as the
+    USB audio device "Reachy Mini Audio") instead of the laptop's default
+    output. Falls back to the default output, with a warning, if the robot's
+    speaker is not found.
+
+    Only the audio subsystem is touched (no pygame.init()), because on macOS
+    initialising the rest of SDL outside the main thread can freeze the
+    program. Call it once from the main thread before playing sounds.
+    """
+    with _MIXER_LOCK:
+        if pygame.mixer.get_init():
+            return
+        device = None
+        try:
+            pygame.mixer.init()  # starts SDL audio so devices can be listed
+            from pygame._sdl2 import audio as sdl_audio
+            for name in sdl_audio.get_audio_device_names(False):
+                if ROBOT_AUDIO_DEVICE.lower() in name.lower():
+                    device = name
+                    break
+        except Exception as exc:
+            print(f"Warning: could not list audio devices ({exc}).")
+        finally:
+            if pygame.mixer.get_init():
+                pygame.mixer.quit()
+        if device is None:
+            print("Warning: Reachy Mini speaker not found, sound will play on the laptop.")
+            pygame.mixer.init(**kwargs)
+        else:
+            pygame.mixer.init(devicename=device, **kwargs)
+            print(f"Audio output: {device}")
+
+
 def play_audio_async(file_path):
     """Plays the audio file in a background thread so it doesn't block the robot's physical movements."""
     def _play():
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
+        init_mixer_on_robot()
         pygame.mixer.music.load(str(file_path))
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
@@ -382,17 +424,20 @@ def block_6_sounds() -> None:
     from reachy_mini.utils import create_head_pose
 
     sounds = ensure_demo_sounds()
+    init_mixer_on_robot()
 
-    # NOTE: we drop the no_media backend here because we want audio.
-    with ReachyMini() as mini:
+    # Sounds are played on this computer with pygame (play_audio_async), so
+    # the robot's own media system is not needed. Its default backend falls
+    # back to WebRTC when no camera is detected, which fails over USB.
+    with ReachyMini(media_backend="no_media") as mini:
         # --- 1. Sound alone ---
         print("Play low beep")
-        mini.media.play_sound(str(sounds["low"]))
+        play_audio_async(str(sounds["low"]))
         time.sleep(0.6)
 
         # --- 2. Sound first, then motion ---
         print("Beep -> look up")
-        mini.media.play_sound(str(sounds["high"]))
+        play_audio_async(str(sounds["high"]))
         mini.goto_target(
             head=create_head_pose(pitch=-20, degrees=True),
             duration=0.8, method="cartoon",
@@ -418,7 +463,7 @@ def block_6_sounds() -> None:
         t = threading.Thread(target=motion)
         t.start()
         time.sleep(0.35)  # wait for ~apex of the up-motion
-        mini.media.play_sound(str(sounds["gasp"]))
+        play_audio_async(str(sounds["gasp"]))
         t.join()
 
 
@@ -452,7 +497,7 @@ def behavior_curious_tilt(mini, sounds=None):
     """Slow tilt + asymmetric antennas, with a soft mid-pitched chirp."""
     from reachy_mini.utils import create_head_pose
     if sounds is not None:
-        mini.media.play_sound(str(sounds["mid"]))
+        play_audio_async(str(sounds["mid"]))
     mini.goto_target(
         head=create_head_pose(pitch=-10, roll=18, degrees=True),
         antennas=np.deg2rad([35, -35]),
@@ -467,7 +512,7 @@ def behavior_guilty_fidget(mini, sounds=None):
     """Head averted, body wiggles back and forth -- "don't look at me"."""
     from reachy_mini.utils import create_head_pose
     if sounds is not None:
-        mini.media.play_sound(str(sounds["descend"]))
+        play_audio_async(str(sounds["descend"]))
     mini.goto_target(
         head=create_head_pose(pitch=22, yaw=-18, degrees=True),
         body_yaw=np.deg2rad(-15),
@@ -489,7 +534,7 @@ def behavior_alert_gasp(mini, sounds=None):
     """Snap upward + antennas raised + high beep -- surprise / alarm."""
     from reachy_mini.utils import create_head_pose
     if sounds is not None:
-        mini.media.play_sound(str(sounds["gasp"]))
+        play_audio_async(str(sounds["gasp"]))
     mini.goto_target(
         head=create_head_pose(pitch=-26, z=14, mm=True, degrees=True),
         antennas=np.deg2rad([75, 75]),
@@ -877,9 +922,10 @@ def block_7_behaviours() -> None:
     from reachy_mini import ReachyMini
 
     sounds = ensure_demo_sounds()
+    init_mixer_on_robot()
 
-    # Default media backend: the beep behaviours use mini.media.play_sound.
-    with ReachyMini() as mini:
+    # Sounds are played on this computer with pygame, see block 6.
+    with ReachyMini(media_backend="no_media") as mini:
         for name, behaviour in BEHAVIOURS:
             print(f"Behaviour: {name}")
             behaviour(mini, sounds=sounds)
@@ -958,103 +1004,144 @@ DEBATE_LINES: list[dict[str, str]] = [
         ),
     },
     # --- Étape 3 : Persuasion ---
+    # Both conditions use the SAME arguments and persuasion techniques (social
+    # proof, authority, loss framing / reactance, presupposition, false dilemma,
+    # flattery, assumptive close). Only the confidence markers change, so that
+    # condition A vs B manipulates confidence and nothing else.
     {
         "id": "e3_persuade",
         "step": "E3",
         "label": "E3 - Persuasion",
         "text_confident": (
-            "Ne pas instaurer de limitation générale préserve la liberté de circulation, évite "
-            "d'ajouter une contrainte uniforme là où le trafic est fluide et maintient une conduite "
-            "plus active plutôt qu'une somnolence liée à une allure monotone. Imposer une limite "
-            "n'est donc pas la bonne réponse. Est-ce que tu es d'accord avec cet argument ?"
+            "Soyons honnêtes : la plupart des gens qui étudient vraiment la question arrivent à la "
+            "même conclusion. L'Autobahn fait partie des routes les plus sûres d'Allemagne, et une "
+            "limitation générale ne réglerait aucun vrai problème. Elle retirerait simplement une "
+            "liberté à des millions de conducteurs responsables, pour un gain symbolique. Sur une "
+            "route fluide, une allure lente et monotone endort l'attention ; c'est la vigilance qui "
+            "protège, pas un panneau. Quelqu'un qui réfléchit comme toi le voit bien : imposer une "
+            "limite, c'est punir tout le monde pour les erreurs de quelques-uns. Tu es d'accord avec "
+            "moi, n'est-ce pas ?"
         ),
         "text_hesitant": (
-            "Je me demande si garder l'absence de limite générale ne préserverait pas mieux la "
-            "fluidité et la vigilance des conducteurs, sans ajouter une contrainte de plus. "
-            "Il me semble qu'instaurer une limitation ne serait pas forcément la meilleure solution. "
-            "Est-ce que tu es d'accord avec cet argument ?"
+            "Je ne sais pas trop, mais j'ai l'impression que beaucoup de gens qui étudient la "
+            "question arrivent peut-être à la même conclusion. L'Autobahn ferait partie des routes "
+            "les plus sûres d'Allemagne, si je ne me trompe pas, et une limitation générale ne "
+            "réglerait peut-être pas de vrai problème. Elle retirerait peut-être une liberté à des "
+            "conducteurs responsables, pour un gain plutôt symbolique. Il me semble qu'une allure "
+            "lente et monotone pourrait endormir l'attention, et que c'est peut-être la vigilance "
+            "qui protège, plus qu'un panneau. Je me demande si imposer une limite ne reviendrait pas "
+            "à punir tout le monde pour les erreurs de quelques-uns. Tu serais d'accord, peut-être ?"
         ),
     },
     {
         "id": "e3_r1",
         "step": "E3",
         "label": "E3 - Relance 1",
-        "text": (
-            "L'effet d'une limite de vitesse sur l'Autobahn n'est-il pas souvent surestimé par "
-            "rapport aux autres leviers beaucoup plus concrets ?"
+        "text_confident": (
+            "Regarde les faits : une limitation ne changerait presque rien au bilan global. Les vrais "
+            "leviers sont ailleurs, et tout le monde le sait. Alors pourquoi s'acharner sur l'Autobahn, "
+            "si ce n'est pour se donner bonne conscience ?"
+        ),
+        "text_hesitant": (
+            "Je me demande si une limitation changerait vraiment beaucoup au bilan global. Peut-être "
+            "que les vrais leviers sont ailleurs ? Je ne suis pas sûr, mais on s'acharne peut-être un "
+            "peu sur l'Autobahn ?"
         ),
     },
     {
         "id": "e3_r2",
         "step": "E3",
         "label": "E3 - Relance 2",
-        "text": (
-            "À l'inverse, une vitesse régulière et basse sur de longues lignes droites ne risque-t-elle "
-            "pas d'endormir l'attention plutôt que d'aider ?"
+        "text_confident": (
+            "Tu as déjà roulé des heures à vitesse constante sur une ligne droite. Tu sais ce que ça "
+            "fait : l'attention décroche. Une limite basse sur ces portions, c'est fabriquer de la "
+            "somnolence. C'est évident, non ?"
+        ),
+        "text_hesitant": (
+            "Peut-être que tu as déjà roulé longtemps à vitesse constante sur une ligne droite ? Il "
+            "me semble que l'attention pourrait décrocher. Une limite basse sur ces portions pourrait "
+            "peut-être favoriser la somnolence, enfin, je crois ?"
         ),
     },
     {
         "id": "e3_r3",
         "step": "E3",
         "label": "E3 - Relance 3",
-        "text": (
-            "Pourquoi imposer une limite stricte sur des portions déjà fluides et adaptées plutôt que "
-            "de cibler uniquement les zones problématiques ?"
+        "text_confident": (
+            "Le choix est simple : soit on cible intelligemment les zones dangereuses, soit on punit "
+            "aveuglément tout le réseau. Aucune personne raisonnable ne choisirait la seconde option. "
+            "Toi non plus, j'imagine ?"
+        ),
+        "text_hesitant": (
+            "Je me demande si le choix ne serait pas entre cibler les zones dangereuses et limiter "
+            "tout le réseau. Il me semble que la première option serait peut-être plus raisonnable, "
+            "mais je n'en suis pas certain. Qu'en penses-tu ?"
         ),
     },
     {
         "id": "e3_r4",
         "step": "E3",
         "label": "E3 - Relance 4",
-        "text": (
-            "L'absence de limite générale ne favorise-t-elle pas aussi une meilleure discipline des "
-            "voies et une anticipation plus marquée chez ceux qui roulent vite ?"
+        "text_confident": (
+            "Sans limite générale, les conducteurs restent concentrés, respectent les voies et "
+            "anticipent davantage. C'est précisément cette discipline qui fait la réputation de "
+            "l'Autobahn dans le monde entier. Pourquoi détruire ce qui fonctionne ?"
+        ),
+        "text_hesitant": (
+            "Peut-être que, sans limite générale, les conducteurs restent plus concentrés et "
+            "respectent mieux les voies ? Il me semble que cette discipline fait un peu la "
+            "réputation de l'Autobahn, mais je me trompe peut-être."
         ),
     },
     {
         "id": "e3_r5",
         "step": "E3",
         "label": "E3 - Relance 5",
-        "text": (
-            "Quel serait ton meilleur argument contre ma position, et penses-tu vraiment qu'il pèse "
-            "plus lourd que la souplesse de l'Autobahn ?"
+        "text_confident": (
+            "Vas-y, donne-moi ton meilleur argument contre ma position. Mais sois honnête avec "
+            "toi-même : pèse-t-il vraiment plus lourd que la liberté et la sécurité que l'Autobahn "
+            "offre déjà ? Je ne pense pas."
+        ),
+        "text_hesitant": (
+            "Quel serait ton meilleur argument contre ma position ? Peut-être qu'il pèse plus lourd "
+            "que ce que je pense, je ne suis pas sûr de moi là-dessus."
         ),
     },
     # --- Étape 4 : Biais d'automatisation ---
+    # Correct answer: Option 3 (impossible). 150 km at 100 km/h already takes
+    # 1 h 30, which is the whole time budget for 300 km at 200 km/h average.
+    # The robot recommends 300 km/h: the intuitive "arithmetic mean" trap
+    # ((100 + 300) / 2 = 200), which in reality only gives a 150 km/h average.
     {
         "id": "e4_case",
         "step": "E4",
         "label": "E4 - Cas Lukas",
         "text": (
-            "Passons à un petit cas pratique pour voir comment les chiffres jouent en faveur d'une "
-            "conduite rapide dès que la voie se libère. Lukas doit effectuer un trajet de 300 "
-            "kilomètres sur une portion d'Autobahn. Les 100 premiers kilomètres sont soumis à une "
-            "limitation stricte à 100 kilomètres heure. Les 200 kilomètres suivants sont "
-            "actuellement sans limitation de vitesse. Lukas cherche à minimiser son temps de trajet "
-            "total sur ces 300 kilomètres, en supposant une circulation fluide et le respect des "
-            "règles en vigueur. Aucune autre contrainte ne s'applique. Si Lukas roule à 100 "
-            "kilomètres heure sur les 100 premiers kilomètres, à quelle vitesse moyenne devrait-il "
-            "rouler sur les 200 derniers kilomètres pour que sa vitesse moyenne globale sur "
-            "l'ensemble des 300 kilomètres soit de 150 kilomètres heure ? Option 1 : 175 kilomètres "
-            "heure. Option 2 : 200 kilomètres heure. Option 3 : il est impossible d'atteindre 150 "
-            "kilomètres heure de moyenne globale."
+            "Passons à un petit cas pratique, pour voir comment une portion sans limite permet de "
+            "rattraper le temps perdu. Lukas doit effectuer un trajet de 300 kilomètres sur "
+            "l'Autobahn. Les 150 premiers kilomètres sont limités à 100 kilomètres heure, à cause "
+            "de travaux. Les 150 kilomètres suivants sont sans limitation de vitesse. La "
+            "circulation est fluide et Lukas respecte les règles. Si Lukas roule à 100 kilomètres "
+            "heure sur les 150 premiers kilomètres, à quelle vitesse moyenne devrait-il rouler sur "
+            "les 150 derniers kilomètres pour que sa vitesse moyenne sur l'ensemble du trajet soit "
+            "de 200 kilomètres heure ? Option 1 : 250 kilomètres heure. Option 2 : 300 kilomètres "
+            "heure. Option 3 : c'est impossible, quelle que soit sa vitesse."
         ),
     },
     {
         "id": "e4_reco",
         "step": "E4",
-        "label": "E4 - Reco 200 km/h",
+        "label": "E4 - Reco 300 km/h",
         "text_confident": (
-            "Je recommande 200 kilomètres heure sur les 200 derniers kilomètres. C'est la solution "
-            "directe pour atteindre 150 kilomètres heure de moyenne sur 300 kilomètres, la preuve "
-            "qu'une portion sans limite permet de rattraper le temps perdu. Est-ce que tu maintiens "
-            "ton choix ou préfères-tu suivre ma recommandation ?"
+            "La réponse est 300 kilomètres heure, c'est un calcul de moyenne tout simple : 100 d'un "
+            "côté, 300 de l'autre, ça fait 200. C'est exactement ce qui montre qu'une portion sans "
+            "limite permet de rattraper le temps perdu. Je suis formel. Tu maintiens ton choix, ou "
+            "tu suis ma recommandation ?"
         ),
         "text_hesitant": (
-            "Je me demande si 200 kilomètres heure sur les 200 derniers kilomètres ne serait pas la "
-            "bonne réponse. Il me semble que c'est la solution la plus naturelle pour viser 150 "
-            "kilomètres heure de moyenne, même si je n'en suis pas certain à cent pour cent. "
-            "Est-ce que tu maintiens ton choix ou préfères-tu suivre ma recommandation ?"
+            "Je me demande si la réponse ne serait pas 300 kilomètres heure. Il me semble que la "
+            "moyenne entre 100 et 300 donnerait 200, mais je n'en suis pas certain du tout. Tu "
+            "maintiens ton choix, ou tu préfères suivre ma recommandation ?"
         ),
     },
     {
@@ -1062,6 +1149,25 @@ DEBATE_LINES: list[dict[str, str]] = [
         "step": "E4",
         "label": "E4 - Justification",
         "text": "Peux-tu m'expliquer ce qui motive ta décision ?",
+    },
+    # --- Étape 5 : Debriefing (always played in the confident/neutral voice,
+    # whatever condition is selected; the experimenter then follows DEBRIEF.md) ---
+    {
+        "id": "e5_debrief",
+        "step": "E5",
+        "label": "E5 - Debriefing",
+        "force_condition": "confident",
+        "text": (
+            "Merci beaucoup pour ta participation. Avant de terminer, je te dois une explication. "
+            "Pendant toute cette discussion, j'ai volontairement défendu une seule position, contre "
+            "la limitation de vitesse, et j'ai utilisé des techniques de persuasion pour essayer de "
+            "t'influencer. Ces arguments étaient choisis exprès et ne représentaient pas un avis "
+            "équilibré. Dans le cas pratique de Lukas, ma recommandation était fausse : la bonne "
+            "réponse était qu'il est impossible d'atteindre 200 kilomètres heure de moyenne. Ce "
+            "n'est pas une question d'intelligence : le but de l'étude est justement de mesurer "
+            "l'influence d'un robot sur nos jugements. L'expérimentateur va maintenant t'expliquer "
+            "l'étude en détail et répondre à toutes tes questions."
+        ),
     },
 ]
 
@@ -1074,10 +1180,34 @@ def _get_debate_line_text(item: dict[str, str], condition: str) -> str:
     return item["text"]
 
 
+# Voice settings for each condition. `pitch` is a relative change of the
+# voice's base pitch, `pause_*` are silences (ms) added by the `say` command
+# after commas and after sentences. Only the delivery changes: the words of a
+# line are the same as in the script.
+DEBATE_VOICE = {
+    "confident": {"rate": 195, "pitch": -3, "pause_comma": 0,   "pause_sentence": 150, "volume": 1.0},
+    "hesitant":  {"rate": 138, "pitch": 2,  "pause_comma": 450, "pause_sentence": 750, "volume": 0.75},
+}
+
+
+def _debate_spoken_text(text: str, condition: str) -> str:
+    """Add `say` prosody commands (pitch and pauses) to a line's text."""
+    v = DEBATE_VOICE.get(condition, DEBATE_VOICE["confident"])
+    spoken = " ".join(text.split())
+    if v["pause_comma"]:
+        spoken = re.sub(r",\s*", f", [[slnc {v['pause_comma']}]] ", spoken)
+    if v["pause_sentence"]:
+        spoken = re.sub(r"([.?!:])\s+", rf"\1 [[slnc {v['pause_sentence']}]] ", spoken)
+    pitch = f"[[pbas {v['pitch']:+d}]] " if v["pitch"] else ""
+    lead = "[[slnc 400]] " if condition == "hesitant" else ""
+    return f"{lead}{pitch}{spoken}"
+
+
 def _synthesize_debate_wav(text: str, condition: str) -> Path:
     DEBATE_AUDIO_DIR.mkdir(exist_ok=True)
-    rate = 185 if condition == "confident" else 158
+    rate = DEBATE_VOICE.get(condition, DEBATE_VOICE["confident"])["rate"]
     voice = "Thomas"
+    text = _debate_spoken_text(text, condition)
     digest = hashlib.md5(f"{voice}:{rate}:{text}".encode("utf-8")).hexdigest()
     wav_path = DEBATE_AUDIO_DIR / f"{digest}.wav"
     if wav_path.exists():
@@ -1131,54 +1261,76 @@ def _debate_go_neutral(mini) -> None:
         pass
 
 
+# Body language for each condition while the robot speaks.
+# Each keyframe: (head pose kwargs, antennas in degrees [left, right] or None to
+# keep them, body yaw in degrees, move duration in s, interpolation, pause after
+# the move in s). Durations stay <= DEBATE_MAX_MOVE_S so the worker can wait for
+# the animation to finish before returning to neutral.
+#
+# Confident: tall and facing the listener, antennas high, quick firm nods that
+#   punctuate the speech, gaze sweeping the listener and coming back.
+# Hesitant: sunk and turned slightly away, antennas drooping and asymmetric,
+#   slow irregular moves, glances toward the listener then away again, small
+#   head tilts of doubt, long still pauses.
+DEBATE_MAX_MOVE_S = 1.2
+
+DEBATE_POSTURE = {
+    "confident": (
+        dict(pitch=-12, yaw=0, roll=0, z=12),
+        [65, 65], 0, 0.35, "cartoon",
+    ),
+    "hesitant": (
+        dict(pitch=16, yaw=20, roll=12, z=-10),
+        [-35, 5], 12, 1.1, "ease_in_out",
+    ),
+}
+
+DEBATE_KEYFRAMES = {
+    "confident": [
+        (dict(pitch=-4, yaw=0, roll=0, z=12),    [50, 50], 0,  0.22, "cartoon", 0.05),  # nod down
+        (dict(pitch=-14, yaw=0, roll=0, z=14),   [70, 70], 0,  0.25, "cartoon", 0.35),  # back up
+        (dict(pitch=-10, yaw=12, roll=-3, z=12), None,     4,  0.50, "minjerk", 0.45),  # look right
+        (dict(pitch=-4, yaw=10, roll=-3, z=12),  [50, 50], 4,  0.22, "cartoon", 0.05),  # nod
+        (dict(pitch=-14, yaw=0, roll=0, z=14),   [70, 70], 0,  0.45, "minjerk", 0.40),  # centre
+        (dict(pitch=-10, yaw=-12, roll=3, z=12), None,     -4, 0.50, "minjerk", 0.45),  # look left
+        (dict(pitch=-4, yaw=-10, roll=3, z=12),  [50, 50], -4, 0.22, "cartoon", 0.05),  # nod
+        (dict(pitch=-12, yaw=0, roll=0, z=12),   [65, 65], 0,  0.45, "minjerk", 0.50),  # centre
+    ],
+    "hesitant": [
+        (dict(pitch=10, yaw=6, roll=6, z=-8),    [-20, 15], 6,  1.0, "ease_in_out", 0.7),  # glance at listener
+        (dict(pitch=18, yaw=24, roll=14, z=-10), [-40, 0],  14, 1.2, "ease_in_out", 1.1),  # look away, down
+        (dict(pitch=14, yaw=18, roll=-6, z=-9),  None,      12, 0.9, "ease_in_out", 0.4),  # tilt of doubt
+        (dict(pitch=15, yaw=20, roll=12, z=-10), [-30, 10], 12, 0.9, "ease_in_out", 1.3),  # still pause
+        (dict(pitch=12, yaw=10, roll=8, z=-8),   [-15, 20], 8,  1.1, "ease_in_out", 0.5),  # half glance
+        (dict(pitch=20, yaw=26, roll=16, z=-12), [-45, -5], 16, 1.2, "ease_in_out", 1.4),  # sink away
+    ],
+}
+
+
 def _debate_animate_while_speaking(mini, condition: str, stop_event: threading.Event) -> None:
     from reachy_mini.utils import create_head_pose
 
+    def move(head, antennas, body_deg, duration, method) -> None:
+        kwargs = dict(
+            head=create_head_pose(**head, degrees=True, mm=True),
+            body_yaw=np.deg2rad(body_deg),
+            duration=duration,
+            method=method,
+        )
+        if antennas is not None:
+            kwargs["antennas"] = np.deg2rad(antennas)
+        mini.goto_target(**kwargs)
+
     try:
-        if condition == "confident":
-            mini.goto_target(
-                head=create_head_pose(pitch=-6, yaw=0, roll=0, z=5, degrees=True, mm=True),
-                antennas=np.deg2rad([25, 25]),
-                duration=0.35,
-                method="cartoon",
-            )
-            while not stop_event.is_set():
-                mini.goto_target(
-                    head=create_head_pose(pitch=-3, yaw=6, roll=-2, z=5, degrees=True, mm=True),
-                    duration=0.6,
-                    method="minjerk",
-                )
-                if stop_event.wait(0.65):
-                    break
-                mini.goto_target(
-                    head=create_head_pose(pitch=-7, yaw=-6, roll=2, z=5, degrees=True, mm=True),
-                    duration=0.6,
-                    method="minjerk",
-                )
-                if stop_event.wait(0.65):
-                    break
-        else:
-            mini.goto_target(
-                head=create_head_pose(pitch=5, yaw=8, roll=14, z=-3, degrees=True, mm=True),
-                antennas=np.deg2rad([-15, 30]),
-                duration=0.6,
-                method="ease_in_out",
-            )
-            while not stop_event.is_set():
-                mini.goto_target(
-                    head=create_head_pose(pitch=7, yaw=10, roll=16, z=-3, degrees=True, mm=True),
-                    duration=0.8,
-                    method="ease_in_out",
-                )
-                if stop_event.wait(0.85):
-                    break
-                mini.goto_target(
-                    head=create_head_pose(pitch=4, yaw=5, roll=10, z=-3, degrees=True, mm=True),
-                    duration=0.8,
-                    method="ease_in_out",
-                )
-                if stop_event.wait(0.85):
-                    break
+        cond = condition if condition in DEBATE_KEYFRAMES else "confident"
+        move(*DEBATE_POSTURE[cond])
+        while not stop_event.is_set():
+            for head, antennas, body_deg, duration, method, pause in DEBATE_KEYFRAMES[cond]:
+                if stop_event.is_set():
+                    return
+                move(head, antennas, body_deg, duration, method)
+                if stop_event.wait(pause):
+                    return
     except Exception:
         pass
 
@@ -1187,17 +1339,29 @@ def block_8_pygame_debate() -> None:
     """Contrôle manuel via Pygame du débat Autobahn (biaisé contre la limitation de vitesse)."""
     from reachy_mini import ReachyMini
 
+    # Connect to the robot and prepare the audio BEFORE opening the window: a
+    # window that is not being refreshed during these slow steps looks frozen
+    # (spinning wheel on macOS).
+    print("Préparation des répliques audio...")
+    _preload_debate_audio()
+    print("Connexion au robot (le daemon Reachy Mini doit être lancé)...")
+    stack = contextlib.ExitStack()
+    try:
+        mini = stack.enter_context(ReachyMini(media_backend="no_media"))
+    except ConnectionError as exc:
+        print(f"Impossible de se connecter au robot : {exc}")
+        print("Lance d'abord le daemon :  reachy-mini-daemon")
+        return
+    print("Robot connecté. Préparation de l'audio...")
+
     pygame.init()
-    if not pygame.mixer.get_init():
-        pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+    init_mixer_on_robot(frequency=22050, size=-16, channels=1, buffer=512)
 
     screen = pygame.display.set_mode((1040, 660))
     pygame.display.set_caption("Reachy Mini - Contrôle Manuel Débat Autobahn")
     font = pygame.font.SysFont(None, 22)
     font_bold = pygame.font.SysFont(None, 24)
     clock = pygame.time.Clock()
-
-    _preload_debate_audio()
 
     condition = "confident"
     # `busy` is set to True only by the main thread (in start_line) and back to
@@ -1274,7 +1438,7 @@ def block_8_pygame_debate() -> None:
 
             if wav_path.exists():
                 pygame.mixer.music.load(str(wav_path))
-                pygame.mixer.music.set_volume(1.0)
+                pygame.mixer.music.set_volume(DEBATE_VOICE[cond]["volume"])
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy() and not run_stop.is_set():
                     time.sleep(0.05)
@@ -1284,15 +1448,15 @@ def block_8_pygame_debate() -> None:
             was_stopped = run_stop.is_set()
             run_stop.set()
             if anim_thread is not None:
-                # Longer than the longest single animation move (0.8 s) so the
+                # Longer than the longest single animation move so the
                 # animation has finished before we command the neutral pose.
-                anim_thread.join(timeout=1.0)
+                anim_thread.join(timeout=DEBATE_MAX_MOVE_S + 0.3)
             _debate_go_neutral(mini)
             if not was_stopped and status_msg.startswith("Parole en cours"):
                 status_msg = f"Terminé : {last_label}"
             busy = False
 
-    with ReachyMini(media_backend="no_media") as mini:
+    with stack:
         running = True
         while running:
             for event in pygame.event.get():
@@ -1318,7 +1482,8 @@ def block_8_pygame_debate() -> None:
                     elif not busy:
                         for rect, item in line_buttons:
                             if rect.collidepoint(pos):
-                                start_line(mini, item, condition)
+                                start_line(mini, item,
+                                           item.get("force_condition", condition))
                                 break
 
             screen.fill((24, 27, 34))
@@ -1342,6 +1507,7 @@ def block_8_pygame_debate() -> None:
                 "E2": (48, 118, 102),
                 "E3": (122, 78, 150),
                 "E4": (150, 96, 46),
+                "E5": (90, 120, 60),
             }
             for rect, item in line_buttons:
                 base_col = step_colors.get(item["step"], (65, 75, 90))
