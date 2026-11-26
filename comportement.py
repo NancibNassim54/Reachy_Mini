@@ -1,6 +1,6 @@
 """
-tutorial_reachy_mini.py
-========================
+comportement.py
+===============
 
 A 3-hour Reachy Mini workshop in a single file. Each tutorial block is a
 self-contained function. Run one block at a time from the command line.
@@ -29,11 +29,19 @@ listen on http://localhost:8000. Leave that terminal alone.
 
 Then in a SECOND terminal (with the same virtualenv activated), run a block:
 
-    python tutorial_reachy_mini.py --block 0
-    python tutorial_reachy_mini.py --block 1
+    python comportement.py --block 0
+    python comportement.py --block 1
     ...
-    python tutorial_reachy_mini.py --block 8
-    python tutorial_reachy_mini.py --block 9     # bonus
+    python comportement.py --block 8
+
+Audio for the music / meme behaviours in block 7 (britney.wav, khaled.wav,
+whitetee.wav, ...) is not shipped with the repo: drop those files next to this
+script. Behaviours whose file is missing are skipped with a message.
+
+The Autobahn debate (block 8) generates its speech with the macOS `say` and
+`afconvert` tools. Pre-generated WAVs for the current lines are committed in
+debate_autobahn_wav/, so on other platforms it works as long as the line
+texts are not changed.
 
 Block index
 -----------
@@ -47,7 +55,6 @@ Block index
     6  Sounds                   -- generate beeps and time them with motion
     7  Behaviour library        -- behaviours as reusable functions
     8  Pygame integration       -- manual control of the Autobahn debate
-    9  Record & replay (bonus)  -- teleop the robot, record, play back
 """
 
 from __future__ import annotations
@@ -55,8 +62,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
-import os
+import shutil
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -121,12 +129,23 @@ def ensure_demo_sounds() -> dict[str, Path]:
     return out
 
 
+def _resolve_audio(audio_path) -> Path:
+    """
+    Find a behaviour's audio file: an absolute path or a file in the current
+    directory is used as is, otherwise it is looked up next to this script.
+    """
+    p = Path(audio_path)
+    if p.is_absolute() or p.exists():
+        return p
+    return Path(__file__).parent / p
+
+
 def play_audio_async(file_path):
     """Plays the audio file in a background thread so it doesn't block the robot's physical movements."""
     def _play():
         if not pygame.mixer.get_init():
             pygame.mixer.init()
-        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.load(str(file_path))
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
             pygame.time.Clock().tick(10)
@@ -488,7 +507,8 @@ def sassy_britney_behavior(mini, audio_path: str = "britney.wav", **kwargs):
     flips antennas dramatically, plays the track, and strikes a pose.
     """
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Error: Could not find audio file at '{audio_path}'. Drop it in this folder!")
         return
 
@@ -533,7 +553,8 @@ def khaled_another_one_behavior(mini, audio_path: str = "khaled.wav", **kwargs):
     and does a sharp, authoritative head nod right as the line drops.
     """
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Error: Could not find audio file at '{audio_path}'. Drop it in this folder!")
         return
 
@@ -577,7 +598,8 @@ def vine_boom_stare_behavior(mini, audio_path: str = "Vine-boom-sound-effect.wav
     tilting its head down to stare deep into your soul as the boom hits.
     """
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Error: Could not find audio file at '{audio_path}'. Drop it in this folder!")
         return
 
@@ -608,7 +630,8 @@ def vine_boom_stare_behavior(mini, audio_path: str = "Vine-boom-sound-effect.wav
 
 def fahhh_meme_behavior(mini, audio_path: str = "FAHHH-_Meme-Sound-Effect_.wav", **kwargs):
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Erreur : Impossible de trouver '{audio_path}'. Ajoute-le au dossier !")
         return
 
@@ -650,7 +673,8 @@ def fahhh_meme_behavior(mini, audio_path: str = "FAHHH-_Meme-Sound-Effect_.wav",
 
 def getout_meme_behavior(mini, audio_path: str = "Get-out-sound-effect__.wav", **kwargs):
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Erreur : Impossible de trouver '{audio_path}'. Ajoute-le au dossier !")
         return
 
@@ -696,7 +720,8 @@ def correct_nod_behavior(mini, audio_path: str = "Correct Ding - Sound effect (H
     Le son est lancé en avance pour compenser la latence de chargement.
     """
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Erreur : Impossible de trouver '{audio_path}'. Ajoute-le au dossier !")
         return
 
@@ -734,12 +759,15 @@ def correct_nod_behavior(mini, audio_path: str = "Correct Ding - Sound effect (H
 def behavior_disgust(mini, audio_path: str = "eww-sound-effect.wav", **kwargs):
     """Sursaut de recul violent suivi d'un détournement de tête ultra-rapide et accentué."""
     from reachy_mini.utils import create_head_pose
-    if os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if audio_path.exists():
         play_audio_async(audio_path)
 
     mini.goto_target(
-        head=create_head_pose(pitch=5, yaw=-85, roll=15, degrees=True),
-        body_yaw=np.deg2rad(-40),
+        # Most of the turn-away comes from the body so the head stays well
+        # inside its yaw range (the other behaviours stay within +/-30 deg).
+        head=create_head_pose(pitch=5, yaw=-35, roll=15, degrees=True),
+        body_yaw=np.deg2rad(-50),
         antennas=np.deg2rad([90, 80]),
         duration=0.30,
         method="cartoon",
@@ -761,11 +789,12 @@ def sadness(mini, audio_path: str = "tristesse.wav", **kwargs):
     mini.goto_target(
         head=create_head_pose(pitch=20, yaw=8, roll=10, degrees=True),
         body_yaw=np.deg2rad(5),
-        antennas=np.deg2rad([-75, 75]),
+        antennas=np.deg2rad([-75, -75]),  # both antennas droop
         duration=1.2,
         method="minjerk",
     )
-    if os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if audio_path.exists():
         play_audio_async(audio_path)
 
     time.sleep(0.4)
@@ -791,7 +820,8 @@ def rizz_behavior(mini, audio_path: str = "whitetee.wav", **kwargs):
     Exécute le 'Rizz Behavior' sur White Tee (11 secondes pile).
     """
     from reachy_mini.utils import create_head_pose
-    if not os.path.exists(audio_path):
+    audio_path = _resolve_audio(audio_path)
+    if not audio_path.exists():
         print(f"Erreur : Impossible de trouver '{audio_path}'. Ajoute-le au dossier !")
         return
 
@@ -822,6 +852,38 @@ def rizz_behavior(mini, audio_path: str = "whitetee.wav", **kwargs):
         antennas=[0.0, 0.0],
         duration=1.0,
     )
+
+
+BEHAVIOURS = [
+    ("nod yes",        behavior_nod_yes),
+    ("shake no",       behavior_shake_no),
+    ("curious tilt",   behavior_curious_tilt),
+    ("guilty fidget",  behavior_guilty_fidget),
+    ("alert gasp",     behavior_alert_gasp),
+    ("disgust",        behavior_disgust),
+    ("sadness",        sadness),
+    ("correct nod",    correct_nod_behavior),
+    ("vine boom",      vine_boom_stare_behavior),
+    ("fahhh",          fahhh_meme_behavior),
+    ("get out",        getout_meme_behavior),
+    ("another one",    khaled_another_one_behavior),
+    ("britney",        sassy_britney_behavior),
+    ("rizz",           rizz_behavior),
+]
+
+
+def block_7_behaviours() -> None:
+    """Play every behaviour of the library once, in order."""
+    from reachy_mini import ReachyMini
+
+    sounds = ensure_demo_sounds()
+
+    # Default media backend: the beep behaviours use mini.media.play_sound.
+    with ReachyMini() as mini:
+        for name, behaviour in BEHAVIOURS:
+            print(f"Behaviour: {name}")
+            behaviour(mini, sounds=sounds)
+            time.sleep(0.8)
 
 
 # ============================================================================
@@ -1021,11 +1083,29 @@ def _synthesize_debate_wav(text: str, condition: str) -> Path:
     if wav_path.exists():
         return wav_path
 
+    if shutil.which("say") is None or shutil.which("afconvert") is None:
+        print(
+            f"Warning: no cached audio for this line and the macOS 'say'/'afconvert' "
+            f"tools are not available, so it cannot be generated ({wav_path.name})."
+        )
+        return wav_path
+
     aiff_path = DEBATE_AUDIO_DIR / f"{digest}.aiff"
-    clean_text = text.replace('"', "").replace("\n", " ")
-    os.system(f'say -v "{voice}" -r {rate} -o "{aiff_path}" "{clean_text}"')
-    if aiff_path.exists():
-        os.system(f'afconvert -f WAVE -d LEI16 "{aiff_path}" "{wav_path}"')
+    clean_text = text.replace("\n", " ")
+    # Arguments are passed as a list (no shell), so the text is never
+    # interpreted by a shell whatever characters it contains.
+    try:
+        subprocess.run(
+            ["say", "-v", voice, "-r", str(rate), "-o", str(aiff_path), "--", clean_text],
+            check=True,
+        )
+        subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", "LEI16", str(aiff_path), str(wav_path)],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"Warning: speech synthesis failed for {wav_path.name}: {exc}")
+    finally:
         aiff_path.unlink(missing_ok=True)
     return wav_path
 
@@ -1120,8 +1200,14 @@ def block_8_pygame_debate() -> None:
     _preload_debate_audio()
 
     condition = "confident"
+    # `busy` is set to True only by the main thread (in start_line) and back to
+    # False only by the worker once its cleanup is finished, so a new line can
+    # never start while the previous one is still running or returning to
+    # neutral.
     busy = False
-    stop_event = threading.Event()
+    # Each run gets its own stop event so that a new run can never "revive" or
+    # be cancelled by a previous one.
+    current_stop: threading.Event | None = None
     status_msg = "Prêt — sélectionne une réplique manuellement."
     last_label = "Aucune"
 
@@ -1147,50 +1233,72 @@ def block_8_pygame_debate() -> None:
         line_buttons.append((rect, item))
 
     def trigger_stop(mini) -> None:
-        nonlocal busy, status_msg
-        stop_event.set()
+        nonlocal status_msg
+        was_busy = busy
+        if current_stop is not None:
+            current_stop.set()
         if pygame.mixer.get_init():
             pygame.mixer.music.stop()
-        busy = False
         status_msg = "Arrêt manuel et retour au neutre."
-        threading.Thread(target=_debate_go_neutral, args=(mini,), daemon=True).start()
+        # While a line is running, its worker returns to neutral and clears
+        # `busy` itself; only move here when nothing else is driving the robot.
+        if not was_busy:
+            threading.Thread(target=_debate_go_neutral, args=(mini,), daemon=True).start()
 
-    def play_line_worker(mini, item: dict[str, str], cond: str) -> None:
-        nonlocal busy, status_msg, last_label
+    def start_line(mini, item: dict[str, str], cond: str) -> None:
+        nonlocal busy, current_stop, status_msg, last_label
+        run_stop = threading.Event()
         busy = True
-        stop_event.clear()
+        current_stop = run_stop
         last_label = f"{item['label']} ({cond.upper()})"
         status_msg = f"Parole en cours : {last_label}"
-
-        wav_path = _synthesize_debate_wav(_get_debate_line_text(item, cond), cond)
-        anim_thread = threading.Thread(
-            target=_debate_animate_while_speaking,
-            args=(mini, cond, stop_event),
+        threading.Thread(
+            target=play_line_worker,
+            args=(mini, item, cond, run_stop),
             daemon=True,
-        )
-        anim_thread.start()
+        ).start()
 
+    def play_line_worker(mini, item: dict[str, str], cond: str,
+                         run_stop: threading.Event) -> None:
+        nonlocal busy, status_msg
+        anim_thread: threading.Thread | None = None
+        was_stopped = False
         try:
+            wav_path = _synthesize_debate_wav(_get_debate_line_text(item, cond), cond)
+            anim_thread = threading.Thread(
+                target=_debate_animate_while_speaking,
+                args=(mini, cond, run_stop),
+                daemon=True,
+            )
+            anim_thread.start()
+
             if wav_path.exists():
                 pygame.mixer.music.load(str(wav_path))
                 pygame.mixer.music.set_volume(1.0)
                 pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy() and not stop_event.is_set():
+                while pygame.mixer.music.get_busy() and not run_stop.is_set():
                     time.sleep(0.05)
+            else:
+                status_msg = f"Audio introuvable pour : {last_label}"
         finally:
-            stop_event.set()
-            anim_thread.join(timeout=0.5)
+            was_stopped = run_stop.is_set()
+            run_stop.set()
+            if anim_thread is not None:
+                # Longer than the longest single animation move (0.8 s) so the
+                # animation has finished before we command the neutral pose.
+                anim_thread.join(timeout=1.0)
             _debate_go_neutral(mini)
-            busy = False
-            if not stop_event.is_set():
+            if not was_stopped and status_msg.startswith("Parole en cours"):
                 status_msg = f"Terminé : {last_label}"
+            busy = False
 
     with ReachyMini(media_backend="no_media") as mini:
         running = True
         while running:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    stop_event.set()
+                    if current_stop is not None:
+                        current_stop.set()
                     if pygame.mixer.get_init():
                         pygame.mixer.music.stop()
                     running = False
@@ -1210,11 +1318,7 @@ def block_8_pygame_debate() -> None:
                     elif not busy:
                         for rect, item in line_buttons:
                             if rect.collidepoint(pos):
-                                threading.Thread(
-                                    target=play_line_worker,
-                                    args=(mini, item, condition),
-                                    daemon=True,
-                                ).start()
+                                start_line(mini, item, condition)
                                 break
 
             screen.fill((24, 27, 34))
@@ -1269,6 +1373,7 @@ BLOCKS = {
     4: block_4_interpolation_methods,
     5: block_5_expressive_poses,
     6: block_6_sounds,
+    7: block_7_behaviours,
     8: block_8_pygame_debate,
 }
 
